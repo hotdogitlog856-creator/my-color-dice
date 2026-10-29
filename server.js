@@ -7,17 +7,22 @@ const crypto = require("node:crypto");
 
 const app = express();
 const production = process.env.NODE_ENV === "production";
-const ownerPassword = process.env.OWNER_PASSWORD;
-const sessionSecret = process.env.SESSION_SECRET;
 
-if (!ownerPassword || ownerPassword.length < 16) {
-  throw new Error("Set OWNER_PASSWORD to a strong password of at least 16 characters.");
+const OWNER_PASSWORD = process.env.OWNER_PASSWORD;
+const OWNER_PIN = process.env.OWNER_PIN;
+const SESSION_SECRET = process.env.SESSION_SECRET;
+
+if (!OWNER_PASSWORD || OWNER_PASSWORD.length < 16) {
+  throw new Error("OWNER_PASSWORD must be at least 16 characters.");
 }
-if (!sessionSecret || sessionSecret.length < 32) {
-  throw new Error("Set SESSION_SECRET to a random secret of at least 32 characters.");
+if (!OWNER_PIN || OWNER_PIN.length < 8) {
+  throw new Error("OWNER_PIN must be at least 8 characters.");
+}
+if (!SESSION_SECRET || SESSION_SECRET.length < 32) {
+  throw new Error("SESSION_SECRET must be at least 32 characters.");
 }
 
-const colors = [
+const COLORS = [
   { name: "Blue", hex: "#3B82F6", emoji: "🔵" },
   { name: "Green", hex: "#22C55E", emoji: "🟢" },
   { name: "Yellow", hex: "#FACC15", emoji: "🟡" },
@@ -26,16 +31,15 @@ const colors = [
   { name: "Red", hex: "#EF4444", emoji: "🔴" }
 ];
 
-// Settings are server-side. For persistence across restarts,
-// replace this object with a database.
-const settings = { mode: "fair", testIndex: 0 };
+const players = new Map();
 
 app.disable("x-powered-by");
 app.use(helmet());
 app.use(express.json({ limit: "10kb" }));
+
 app.use(cookieSession({
-  name: "dice_owner",
-  keys: [sessionSecret],
+  name: "my_color_dice",
+  keys: [SESSION_SECRET],
   httpOnly: true,
   secure: production,
   sameSite: "strict",
@@ -45,265 +49,216 @@ app.use(cookieSession({
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 5,
-  standardHeaders: "draft-8",
+  standardHeaders: true,
   legacyHeaders: false
 });
 
 function ownerOnly(req, res, next) {
-  if (req.session && req.session.owner === true) return next();
+  if (req.session?.owner === true) return next();
   return res.status(401).json({ error: "Owner login required." });
 }
 
-app.get("/api/state", (req, res) => {
+function getPlayer(req) {
+  const id = req.session?.playerId;
+  return id ? players.get(id) || null : null;
+}
+
+function noCache(res) {
   res.set("Cache-Control", "no-store");
-  res.json({
-    colors,
-    mode: settings.mode,
-    testing: settings.mode === "testing"
-  });
-});
+}
 
-app.get("/api/me", (req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.json({ owner: req.session?.owner === true });
-});
-
-app.post("/api/login", loginLimiter, (req, res) => {
-  const supplied = typeof req.body?.password === "string"
-    ? req.body.password
-    : "";
-
-  // Compare fixed-length hashes to avoid a length-based comparison.
-  const expected = crypto.createHash("sha256").update(ownerPassword).digest();
-  const actual = crypto.createHash("sha256").update(supplied).digest();
-
-  if (!crypto.timingSafeEqual(expected, actual)) {
-    return res.status(401).json({ error: "Incorrect password." });
-  }
-
-  req.session = { owner: true };
-  res.set("Cache-Control", "no-store");
-  res.json({ ok: true });
-});
-
-app.post("/api/logout", ownerOnly, (req, res) => {
-  req.session = null;
-  res.json({ ok: true });
-});
-
-app.post("/api/settings", ownerOnly, (req, res) => {
-  const { mode, testIndex } = req.body || {};
-
-  if (!["fair", "testing"].includes(mode)) {
-    return res.status(400).json({ error: "Invalid mode." });
-  }
-
-  if (
-    !Number.isInteger(testIndex) ||
-    testIndex < 0 ||
-    testIndex >= colors.length
-  ) {
-    return res.status(400).json({ error: "Invalid test color." });
-  }
-
-  settings.mode = mode;
-  settings.testIndex = testIndex;
-
-  res.json({ ok: true, mode, testIndex });
-});
-
-app.post("/api/roll", (req, res) => {
-  // The server, not the browser, decides the outcome.
-  const index = settings.mode === "testing"
-    ? settings.testIndex
-    : crypto.randomInt(0, colors.length);
-
-  res.set("Cache-Control", "no-store");
-  res.json({
-    color: colors[index],
-    testing: settings.mode === "testing"
-  });
-});
-
-const page = String.raw`<!doctype html>
+const page = String.raw\`<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#101025">
 <title>My Color Dice</title>
 <style>
-:root{font-family:system-ui,sans-serif;color:#fff;background:#101025}
 *{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:radial-gradient(ellipse at top,#29205b,#101025 65%);padding:24px}
+body{margin:0;padding:20px;font-family:system-ui,sans-serif;color:white;background:radial-gradient(ellipse at top,#29205b,#101025 70%);min-height:100vh}
 main{max-width:760px;margin:auto}
-header{text-align:center;padding:20px 0}
-h1{font-size:clamp(2.2rem,7vw,4rem);margin:0;background:linear-gradient(90deg,#60a5fa,#a78bfa,#fb923c);color:transparent;background-clip:text}
-p{color:#c6c4de}
-.panel{background:#ffffff0d;border:1px solid #ffffff24;border-radius:24px;padding:24px;margin:18px 0;box-shadow:0 16px 60px #0002}
-#die{width:190px;height:190px;margin:22px auto;border:7px solid #ffffffaa;border-radius:36px;display:grid;place-items:center;font-size:6rem;background:#3B82F6;box-shadow:0 12px 45px #0006;transition:background .25s,transform .25s}
-#die.rolling{animation:bounce .18s infinite alternate}
-@keyframes bounce{to{transform:rotate(8deg) scale(.96)}}
-button,input,select{font:inherit;border-radius:12px;padding:12px 15px;border:1px solid #ffffff38}
-button{cursor:pointer;font-weight:750;background:#a78bfa;color:#17122d}
-button:disabled{opacity:.6;cursor:wait}
-input,select{background:#18172e;color:white;width:100%;margin:6px 0 12px}
-.actions{display:flex;justify-content:center;gap:10px;flex-wrap:wrap}
-#roll{font-size:1.2rem;padding:14px 28px;background:linear-gradient(90deg,#60a5fa,#a78bfa,#fb923c)}
-.result{text-align:center;font-size:1.2rem;font-weight:750;min-height:32px}
-.notice{padding:12px;border-radius:12px;background:#facc1520;color:#fde68a}
-.hidden{display:none!important}
-.colors{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-.swatch{padding:10px 4px;border-radius:12px;text-align:center;font-size:.9rem;font-weight:700}
-label{display:block;margin-top:12px;font-weight:650}
-footer{text-align:center;color:#aaa6c9;font-size:.85rem;padding:20px}
+header{text-align:center;padding:20px}
+h1{font-size:clamp(2.5rem,8vw,4rem);background:linear-gradient(90deg,#60a5fa,#a78bfa,#fb923c);color:transparent;background-clip:text}
+.panel{background:#ffffff0d;border:1px solid #ffffff24;border-radius:22px;padding:22px;margin:16px 0}
+button,input,select{font:inherit;padding:12px;border-radius:10px}
+button{cursor:pointer;background:#a78bfa;color:#17122d;font-weight:bold}
+input,select{width:100%;margin:6px 0 12px;background:#18172e;color:white}
+#die{width:170px;height:170px;margin:20px auto;border:6px solid #ffffffaa;border-radius:30px;display:grid;place-items:center;font-size:5rem;background:#3B82F6}
+.center{text-align:center}
+.colors{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.swatch{padding:12px 4px;border-radius:10px;text-align:center;font-weight:bold}
+.hidden{display:none}
+.notice{padding:12px;background:#facc1520;border-radius:10px}
 </style>
 </head>
 <body><main>
 <header><h1>🌈 My Color Dice</h1><p>Your colors. Your roll. Your game.</p></header>
-<section class="panel" aria-label="Dice roller">
-<div id="status" class="result" aria-live="polite">Ready to roll?</div>
-<div id="die" aria-label="Dice result">🎲</div>
-<div id="result" class="result" aria-live="polite">Choose Roll Dice to begin</div>
-<div id="modeNotice" class="notice hidden">Testing mode is active. Results are owner-controlled, not random.</div>
-<div class="actions"><button id="roll">🎲 Roll Dice</button></div>
+<section class="panel" id="join">
+<h2>Join the game</h2>
+<input id="nickname" maxlength="24" placeholder="Your nickname">
+<button id="joinBtn">Join game</button>
 </section>
-<section class="panel"><h2>Six rainbow colors</h2><div id="colors" class="colors"></div></section>
+<section class="panel hidden" id="game">
+<div class="center"><p id="playerName"></p><div id="die">🎲</div><h3 id="result">Ready to roll?</h3><p id="notice" class="notice">Fair random mode.</p>
+<button id="rollBtn">🎲 Roll Dice</button>
+<button id="newBtn">New game</button></div>
+<h3>Available colors</h3><div id="colors" class="colors"></div>
+</section>
 <section class="panel">
-<h2>🔐 Owner dashboard</h2>
-<p>Only the owner can change the dice mode and test result.</p>
-<form id="loginForm">
-<label for="password">Owner password</label>
-<input id="password" type="password" autocomplete="current-password" required minlength="1" placeholder="Enter your owner password">
-<button type="submit">Owner login</button>
+<h2>🔐 Private owner panel</h2>
+<form id="login">
+<label>Owner password</label><input id="password" type="password" required>
+<label>Verification PIN</label><input id="pin" type="password" required>
+<button>Owner login</button>
 </form>
-<div id="ownerPanel" class="hidden">
-<p>You're logged in as the owner.</p>
-<label for="mode">Dice mode</label>
-<select id="mode"><option value="fair">Fair random dice</option><option value="testing">Testing mode (controlled result)</option></select>
-<label for="testColor">Test outcome</label>
-<select id="testColor"></select>
-<div class="actions"><button id="save" type="button">Save settings</button><button id="logout" type="button">Log out</button></div>
-<p id="ownerMessage" aria-live="polite"></p>
-</div>
-<p id="loginMessage" aria-live="polite"></p>
+<div id="owner" class="hidden">
+<button id="refresh">Refresh players</button>
+<button id="logout">Log out</button>
+<label>Select player</label><select id="players"></select>
+<h3>Disable or restore colors</h3><div id="ownerColors" class="colors"></div>
+<label>Controlled test result</label><select id="forced"></select>
+<button id="save">Save settings</button>
+<p id="ownerMessage"></p>
+</div><p id="loginMessage"></p>
 </section>
-<footer>My Color Dice · Testing mode is clearly identified.</footer>
+<footer>Testing results and disabled colors are disclosed to players.</footer>
 </main>
 <script>
-const $ = id => document.getElementById(id);
-let busy = false;
-let colors = [];
-
-async function api(url, options={}) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Request failed");
-  return data;
+const $=id=>document.getElementById(id);
+let colors=[],player=null,players=[],disabled=new Set(),forced=null;
+async function api(url,options={}){
+ const r=await fetch(url,{credentials:"same-origin",...options,headers:{"Content-Type":"application/json",...(options.headers||{})}});
+ const d=await r.json();if(!r.ok)throw Error(d.error||"Request failed");return d;
 }
-function renderColors() {
-  $("colors").innerHTML = "";
-  $("testColor").innerHTML = "";
-  colors.forEach((c,i) => {
-    const swatch = document.createElement("div");
-    swatch.className = "swatch";
-    swatch.style.background = c.hex;
-    swatch.style.color = c.name === "Yellow" ? "#241d00" : "#fff";
-    swatch.textContent = c.emoji + " " + c.name;
-    $("colors").append(swatch);
-    const option = document.createElement("option");
-    option.value = String(i);
-    option.textContent = c.name;
-    $("testColor").append(option);
-  });
+function render(){
+ $("colors").replaceChildren();$("ownerColors").replaceChildren();$("forced").replaceChildren();
+ const fair=document.createElement("option");fair.value="";fair.textContent="Fair random";$("forced").append(fair);
+ colors.forEach((c,i)=>{
+  const s=document.createElement("div");s.className="swatch";
+  s.style.background=c.hex;s.style.color=c.name==="Yellow"?"#241d00":"white";
+  s.textContent=(player?.disabledColors.includes(i)?"Disabled: ":"")+c.emoji+" "+c.name;
+  $("colors").append(s);
+  const b=document.createElement("button");b.className="swatch";b.type="button";
+  b.style.background=c.hex;b.style.color=c.name==="Yellow"?"#241d00":"white";
+  b.textContent=(disabled.has(i)?"Restore ":"Disable ")+c.name;
+  b.onclick=()=>{disabled.has(i)?disabled.delete(i):disabled.add(i);render();};
+  $("ownerColors").append(b);
+  const o=document.createElement("option");o.value=i;o.textContent=c.name;$("forced").append(o);
+ });
+ $("forced").value=forced===null?"":String(forced);
 }
-async function refresh() {
-  const state = await api("/api/state");
-  colors = state.colors;
-  renderColors();
-  $("modeNotice").classList.toggle("hidden", !state.testing);
-  $("status").textContent = state.testing ? "Testing mode" : "Fair random mode";
-  const me = await api("/api/me");
-  $("ownerPanel").classList.toggle("hidden", !me.owner);
-  $("loginForm").classList.toggle("hidden", me.owner);
-  if (me.owner) $("mode").value = state.mode;
+async function refreshState(){
+ const s=await api("/api/state");colors=s.colors;player=s.player;
+ $("join").classList.toggle("hidden",!!player);$("game").classList.toggle("hidden",!player);
+ if(player){$("playerName").textContent="Playing as "+player.name;$("notice").textContent=s.notice;}
+ render();
 }
-$("roll").addEventListener("click", async () => {
-  if (busy) return;
-  busy = true;
-  $("roll").disabled = true;
-  $("die").classList.add("rolling");
-  $("result").textContent = "Rolling...";
-  try {
-    // Brief animation; actual outcome comes from the server.
-    await new Promise(resolve => setTimeout(resolve, 450));
-    const data = await api("/api/roll", { method: "POST", body: "{}" });
-    $("die").style.background = data.color.hex;
-    $("die").textContent = data.color.emoji;
-    $("result").textContent = data.color.name + " " + data.color.hex;
-    $("modeNotice").classList.toggle("hidden", !data.testing);
-    $("status").textContent = data.testing ? "Testing mode" : "Fair random mode";
-  } catch (e) {
-    $("result").textContent = e.message;
-  } finally {
-    $("die").classList.remove("rolling");
-    $("roll").disabled = false;
-    busy = false;
-  }
-});
-$("loginForm").addEventListener("submit", async e => {
-  e.preventDefault();
-  $("loginMessage").textContent = "";
-  try {
-    await api("/api/login", {
-      method: "POST",
-      body: JSON.stringify({password: $("password").value})
-    });
-    $("password").value = "";
-    $("loginMessage").textContent = "Owner login successful.";
-    await refresh();
-  } catch (err) {
-    $("loginMessage").textContent = err.message;
-  }
-});
-$("save").addEventListener("click", async () => {
-  try {
-    await api("/api/settings", {
-      method: "POST",
-      body: JSON.stringify({
-        mode: $("mode").value,
-        testIndex: Number($("testColor").value)
-      })
-    });
-    $("ownerMessage").textContent = "Settings saved.";
-    await refresh();
-  } catch (e) {
-    $("ownerMessage").textContent = e.message;
-  }
-});
-$("logout").addEventListener("click", async () => {
-  try {
-    await api("/api/logout", {method:"POST",body:"{}"});
-    $("ownerMessage").textContent = "Logged out.";
-    await refresh();
-  } catch(e) {
-    $("ownerMessage").textContent = e.message;
-  }
-});
-refresh().catch(e => $("result").textContent = "Could not connect to server: " + e.message);
-</script>
-</body></html>`;
+async function refreshPlayers(){
+ const d=await api("/api/owner/players");players=d.players;
+ $("players").replaceChildren();
+ players.forEach(p=>{const o=document.createElement("option");o.value=p.id;o.textContent=p.name;$("players").append(o);});
+ loadPlayer();
+}
+function loadPlayer(){
+ const p=players.find(p=>p.id===$("players").value);
+ disabled=new Set(p?.disabledColors||[]);forced=p?.forcedColor??null;
+ $("ownerMessage").textContent=p?"Selected: "+p.name:"No active players yet.";
+ render();
+}
+$("joinBtn").onclick=async()=>{
+ try{await api("/api/join",{method:"POST",body:JSON.stringify({name:$("nickname").value})});await refreshState();}
+ catch(e){alert(e.message);}
+};
+$("rollBtn").onclick=async()=>{
+ try{
+ const d=await api("/api/roll",{method:"POST",body:"{}"});
+ $("die").style.background=d.color.hex;$("die").textContent=d.color.emoji;
+ $("result").textContent=d.color.name+" "+d.color.hex;$("notice").textContent=d.notice;
+ await refreshState();
+ }catch(e){$("result").textContent=e.message;}
+};
+$("newBtn").onclick=async()=>{
+ try{await api("/api/new-game",{method:"POST",body:"{}"});await refreshState();$("result").textContent="New game. Colors restored.";}
+ catch(e){$("result").textContent=e.message;}
+};
+$("login").onsubmit=async e=>{
+ e.preventDefault();
+ try{
+ await api("/api/login",{method:"POST",body:JSON.stringify({password:$("password").value,pin:$("pin").value})});
+ $("password").value="";$("pin").value="";$("login").classList.add("hidden");$("owner").classList.remove("hidden");
+ await refreshPlayers();$("loginMessage").textContent="Owner verified.";
+ }catch(err){$("loginMessage").textContent=err.message;}
+};
+$("refresh").onclick=()=>refreshPlayers().catch(e=>$("ownerMessage").textContent=e.message);
+$("players").onchange=loadPlayer;
+$("forced").onchange=()=>{forced=$("forced").value===""?null:Number($("forced").value);};
+$("save").onclick=async()=>{
+ const id=$("players").value;if(!id)return;
+ try{
+ await api("/api/owner/players/"+encodeURIComponent(id),{method:"PUT",body:JSON.stringify({disabledColors:[...disabled],forcedColor:$("forced").value===""?null:Number($("forced").value)})});
+ $("ownerMessage").textContent="Saved.";await refreshPlayers();
+ }catch(e){$("ownerMessage").textContent=e.message;}
+};
+$("logout").onclick=async()=>{
+ try{await api("/api/logout",{method:"POST",body:"{}"});$("owner").classList.add("hidden");$("login").classList.remove("hidden");}
+ catch(e){$("ownerMessage").textContent=e.message;}
+};
+async function boot(){
+ colors=(await api("/api/state")).colors;
+ const me=await api("/api/me");
+ if(me.playerId)await refreshState();else render();
+ if(me.owner){$("login").classList.add("hidden");$("owner").classList.remove("hidden");await refreshPlayers();}
+}
+boot().catch(e=>{$("result").textContent=e.message;});
+</script></body></html>\`;
 
-app.get("/", (req, res) => {
-  res.set("Cache-Control", "no-store");
-  res.type("html").send(page);
-});
+const cryptoSafeEqual = (a,b) => {
+  const x = crypto.createHash("sha256").update(a).digest();
+  const y = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(x,y);
+};
 
-const port = Number(process.env.PORT || 3000);
-app.listen(port, "0.0.0.0", () => {
-  console.log(`My Color Dice is running on port ${port}`);
+app.get("/api/me",(req,res)=>{
+ noCache(res);res.json({owner:req.session?.owner===true,playerId:req.session?.playerId||null});
 });
+app.post("/api/join",(req,res)=>{
+ let p=getPlayer(req);
+ if(!p){p={id:crypto.randomUUID(),name:String(req.body?.name||"Player").replace(/[<>]/g,"").slice(0,24),disabledColors:[],forcedColor:null,lastSeen:Date.now()};players.set(p.id,p);}
+ req.session={...(req.session||{}),playerId:p.id};noCache(res);res.json({player:p});
+});
+app.get("/api/state",(req,res)=>{
+ const p=getPlayer(req);
+ res.json({colors:COLORS,player:p,notice:!p?"Join the game":p.forcedColor!==null?"Testing mode: owner-selected outcome":p.disabledColors.length?"Some colors are disabled":"Fair random mode"});
+});
+app.post("/api/login",loginLimiter,(req,res)=>{
+ const pw=typeof req.body?.password==="string"?req.body.password:"";
+ const pin=typeof req.body?.pin==="string"?req.body.pin:"";
+ if(!cryptoSafeEqual(pw,OWNER_PASSWORD)||!cryptoSafeEqual(pin,OWNER_PIN))return res.status(401).json({error:"Incorrect password or PIN"});
+ req.session={...(req.session||{}),owner:true};noCache(res);res.json({ok:true});
+});
+app.post("/api/logout",ownerOnly,(req,res)=>{const id=req.session?.playerId;req.session=id?{playerId:id}:null;res.json({ok:true});});
+app.get("/api/owner/players",ownerOnly,(req,res)=>{
+ const list=[...players.values()].filter(p=>Date.now()-p.lastSeen<1800000);
+ res.json({players:list});
+});
+app.put("/api/owner/players/:id",ownerOnly,(req,res)=>{
+ const p=players.get(req.params.id);if(!p)return res.status(404).json({error:"Player not found"});
+ const {disabledColors,forcedColor}=req.body||{};
+ if(!Array.isArray(disabledColors)||!disabledColors.every(i=>Number.isInteger(i)&&i>=0&&i<COLORS.length)||new Set(disabledColors).size>=COLORS.length)return res.status(400).json({error:"Invalid disabled colors"});
+ if(forcedColor!==null&&(!Number.isInteger(forcedColor)||forcedColor<0||forcedColor>=COLORS.length||disabledColors.includes(forcedColor)))return res.status(400).json({error:"Invalid test color"});
+ p.disabledColors=[...new Set(disabledColors)];p.forcedColor=forcedColor;noCache(res);res.json({player:p});
+});
+app.post("/api/roll",(req,res)=>{
+ const p=getPlayer(req);if(!p)return res.status(400).json({error:"Join first"});
+ p.lastSeen=Date.now();
+ if(p.forcedColor!==null)return res.json({color:COLORS[p.forcedColor],controlled:true,notice:"Owner-selected testing outcome"});
+ const available=COLORS.filter((_,i)=>!p.disabledColors.includes(i));
+ if(!available.length)return res.status(400).json({error:"No colors available"});
+ res.json({color:available[crypto.randomInt(0,available.length)],controlled:false,notice:"Random among available colors"});
+});
+app.post("/api/new-game",(req,res)=>{
+ const p=getPlayer(req);if(!p)return res.status(400).json({error:"Join first"});
+ p.disabledColors=[];p.forcedColor=null;res.json({ok:true});
+});
+app.get("/",(req,res)=>{noCache(res);res.type("html").send(page);});
+app.listen(Number(process.env.PORT||3000),"0.0.0.0",()=>console.log("My Color Dice running"));
