@@ -209,7 +209,7 @@ async function boot(){
  if(me.owner){$("login").classList.add("hidden");$("owner").classList.remove("hidden");await refreshPlayers();}
 }
 boot().catch(e=>{$("result").textContent=e.message;});
-</script></body></html>\`;
+</script></body></html>`;
 
 const cryptoSafeEqual = (a,b) => {
   const x = crypto.createHash("sha256").update(a).digest();
